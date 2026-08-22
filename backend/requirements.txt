@@ -6,4 +6,5 @@ pypdf
 python-dotenv
 python-jose
 passlib
+python-multipart
 groq
