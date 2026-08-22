@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 pinecone
-sentence-transformers
+fastembed
 pypdf
 python-dotenv
 python-jose
 passlib
+groq

@@ -3,61 +3,66 @@
 # backend/app/main.py
 # ============================================================
 
-import os
 import json
-import uuid
 import shutil
-from pathlib import Path
+import uuid
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-
-from fastapi import (
-    FastAPI,
-    UploadFile,
-    File,
-    HTTPException,
-)
-
-from fastapi.middleware.cors import CORSMiddleware
-
-from pydantic import BaseModel, Field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import Header
-from .pinecone_store import (
-    index_pdf_chunks,
-    delete_pdf_vectors,
-    search_pinecone,
-    get_pinecone_stats,
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
 )
-from .auth import (
-    init_auth_db,
-    create_user,
-    get_user_by_email,
-    verify_password,
-    create_access_token,
-    decode_access_token,
-)
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-# ============================================================
-# LOAD ENVIRONMENT
-# ============================================================
+# ------------------------------------------------------------
+# ENVIRONMENT
+# ------------------------------------------------------------
 
 load_dotenv()
 
+# ------------------------------------------------------------
+# PINECONE
+# IMPORTANT: this is the ONLY document vector system used here.
+# There is NO VectorStore / SentenceTransformer import.
+# ------------------------------------------------------------
 
-# ============================================================
-# LOCAL IMPORTS
-# ============================================================
+from .pinecone_store import (
+    delete_pdf_vectors,
+    get_pinecone_stats,
+    index_pdf_chunks,
+    search_pinecone,
+)
 
+# ------------------------------------------------------------
+# PDF + LLM
+# ------------------------------------------------------------
+
+from .pdf_processor import extract_pdf_chunks
 from .llm import (
     generate_chat_answer,
     generate_document_answer,
 )
 
-from .vector_store import VectorStore
+# ------------------------------------------------------------
+# AUTH
+# ------------------------------------------------------------
 
-from .pdf_processor import extract_pdf_chunks
+from .auth import (
+    create_access_token,
+    create_user,
+    decode_access_token,
+    get_user_by_email,
+    init_auth_db,
+    verify_password,
+)
 
 
 # ============================================================
@@ -67,38 +72,21 @@ from .pdf_processor import extract_pdf_chunks
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 UPLOAD_DIR = BASE_DIR / "uploads"
-
-VECTOR_DB_DIR = BASE_DIR / "vector_db"
-
 DATA_DIR = BASE_DIR / "data"
-
 CHATS_FILE = DATA_DIR / "chats.json"
 
-
-UPLOAD_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-VECTOR_DB_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-DATA_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
-# APP
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
     title="Enterprise AI",
     description="Enterprise AI Document Assistant",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 
@@ -108,25 +96,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-
-    allow_credentials=True,
-
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
-
     allow_headers=["*"],
 )
-
-
-# ============================================================
-# GLOBAL VECTOR STORE
-# ============================================================
-
-vector_store: Optional[VectorStore] = None
 
 
 # ============================================================
@@ -136,191 +110,132 @@ vector_store: Optional[VectorStore] = None
 chats: Dict[str, Dict[str, Any]] = {}
 
 
-# ============================================================
-# LOAD CHATS
-# ============================================================
-
-def load_chats():
-
+def load_chats() -> None:
     global chats
 
     if not CHATS_FILE.exists():
-
         chats = {}
-
         return
 
     try:
-
-        with open(
-            CHATS_FILE,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
+        with open(CHATS_FILE, "r", encoding="utf-8") as file:
             data = json.load(file)
 
+        # Current format: dictionary keyed by chat ID.
         if isinstance(data, dict):
-
             chats = data
+            return
 
-        else:
-
-            chats = {}
-
-    except Exception as error:
-
-        print(
-            "[CHATS] Failed to load chats:",
-            error,
-        )
+        # Backward compatibility if an older version stored a list.
+        if isinstance(data, list):
+            chats = {
+                str(item.get("id")): item
+                for item in data
+                if isinstance(item, dict) and item.get("id")
+            }
+            return
 
         chats = {}
 
+    except Exception as error:
+        print("[CHATS] Load error:", repr(error))
+        chats = {}
 
-# ============================================================
-# SAVE CHATS
-# ============================================================
 
-def save_chats():
-
+def save_chats() -> None:
     try:
-
-        with open(
-            CHATS_FILE,
-            "w",
-            encoding="utf-8",
-        ) as file:
-
+        with open(CHATS_FILE, "w", encoding="utf-8") as file:
             json.dump(
                 chats,
                 file,
                 indent=2,
                 ensure_ascii=False,
             )
-
     except Exception as error:
-
-        print(
-            "[CHATS] Failed to save chats:",
-            error,
-        )
+        print("[CHATS] Save error:", repr(error))
 
 
-# ============================================================
-# CREATE CHAT
-# ============================================================
+def now_iso() -> str:
+    return datetime.now().isoformat()
 
-def create_chat(
-    first_message: str = "",
-):
 
-    chat_id = str(
-        uuid.uuid4()
-    )
+def create_chat(first_message: str = "") -> Dict[str, Any]:
+    chat_id = str(uuid.uuid4())
+    timestamp = now_iso()
 
     title = (
-        first_message.strip()[:40]
-        if first_message
+        first_message.strip()[:45]
+        if first_message and first_message.strip()
         else "New chat"
     )
 
-    chats[chat_id] = {
-
+    chat = {
         "id": chat_id,
-
         "title": title,
-
-        "created_at": datetime.now().isoformat(),
-
-        "updated_at": datetime.now().isoformat(),
-
+        "created_at": timestamp,
+        "updated_at": timestamp,
         "messages": [],
     }
 
+    chats[chat_id] = chat
     save_chats()
 
-    return chats[chat_id]
+    return chat
 
-
-# ============================================================
-# GET OR CREATE CHAT
-# ============================================================
 
 def get_or_create_chat(
     chat_id: Optional[str],
     first_message: str = "",
-):
-
+) -> Dict[str, Any]:
     if chat_id and chat_id in chats:
-
         return chats[chat_id]
 
-    return create_chat(
-        first_message=first_message
-    )
+    return create_chat(first_message)
 
-
-# ============================================================
-# ADD CHAT MESSAGE
-# ============================================================
 
 def add_chat_message(
     chat: Dict[str, Any],
     role: str,
     content: str,
     sources: Optional[List[Dict[str, Any]]] = None,
-):
-
-    message = {
-
+) -> None:
+    message: Dict[str, Any] = {
         "role": role,
-
         "content": content,
-
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": now_iso(),
     }
 
     if sources:
-
         message["sources"] = sources
 
-    chat["messages"].append(
-        message
-    )
-
-    chat["updated_at"] = (
-        datetime.now().isoformat()
-    )
+    chat.setdefault("messages", []).append(message)
+    chat["updated_at"] = now_iso()
 
 
 # ============================================================
-# DOCUMENT LIST
+# DOCUMENTS
 # ============================================================
 
-def get_documents():
+def get_documents() -> List[Dict[str, Any]]:
+    documents: List[Dict[str, Any]] = []
 
-    documents = []
+    for path in sorted(UPLOAD_DIR.glob("*.pdf")):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
 
-    for path in sorted(
-        UPLOAD_DIR.glob("*.pdf")
-    ):
-
-        documents.append({
-
-            # Use the stored filename as the document ID.
-            # This matches the actual file saved in uploads/.
-            "id": path.name,
-
-            "filename": path.name,
-
-            "name": path.name,
-
-            "size": path.stat().st_size,
-
-            "indexed": True,
-
-        })
+        documents.append(
+            {
+                "id": path.name,
+                "document_id": path.name,
+                "filename": path.name,
+                "original_name": path.name,
+                "name": path.name,
+                "size": size,
+                "indexed": True,
+            }
+        )
 
     return documents
 
@@ -328,62 +243,52 @@ def get_documents():
 # ============================================================
 # REQUEST MODELS
 # ============================================================
-class AuthRequest(BaseModel):
 
-    name: Optional[str] = None
-
-    email: str
-
-    password: str
 class AskRequest(BaseModel):
-
-    question: str = Field(
-        ...,
-        min_length=1,
-    )
-
+    question: str = Field(..., min_length=1)
     chat_id: Optional[str] = None
-
     history: Optional[List[Dict[str, Any]]] = None
-
     route: Optional[str] = None
-
     mode: Optional[str] = None
-
     filename: Optional[str] = None
 
 
 class ChatCreateRequest(BaseModel):
-
     title: Optional[str] = None
 
 
-# ============================================================
-# HELPER:
-# IS DOCUMENT QUESTION?
-# ============================================================
+class RegisterRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=6)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=1)
+
 
 # ============================================================
-# HELPER:
-# IS DOCUMENT QUESTION?
+# ROUTING
 # ============================================================
 
 def is_document_question(
     question: str,
     route: Optional[str] = None,
     mode: Optional[str] = None,
+    filename: Optional[str] = None,
 ) -> bool:
+    # Selecting a document in the frontend always means document mode.
+    if filename and filename.strip():
+        return True
 
-    question_text = question.lower().strip()
+    for value in (route, mode):
+        if not value:
+            continue
 
-    # --------------------------------------------------------
-    # 1. Explicit document route
-    # --------------------------------------------------------
+        normalized = value.lower().strip()
 
-    if route:
-        route_value = route.lower().strip()
-
-        if route_value in {
+        if normalized in {
             "document",
             "documents",
             "pdf",
@@ -391,204 +296,98 @@ def is_document_question(
         }:
             return True
 
-        if route_value in {
-            "general",
+        if normalized in {
             "conversation",
+            "chat",
+            "general",
         }:
             return False
-
-    # --------------------------------------------------------
-    # 2. Explicit document mode
-    # --------------------------------------------------------
-
-    if mode:
-        mode_value = mode.lower().strip()
-
-        if mode_value in {
-            "document",
-            "documents",
-            "pdf",
-            "document_search",
-        }:
-            return True
-
-        # IMPORTANT:
-        # Do NOT treat "chat" as automatically meaning
-        # normal conversation. We still check the question.
-        #
-        # This allows questions such as:
-        # "What topics are covered in this module?"
-        # to go to Pinecone.
-
-        if mode_value in {
-            "general",
-            "conversation",
-        }:
-            return False
-
-    # --------------------------------------------------------
-    # 3. Document-related keywords
-    # --------------------------------------------------------
-
-    document_keywords = [
-
-        # PDF / document references
-        "pdf",
-        "document",
-        "uploaded document",
-        "uploaded pdf",
-        "this document",
-        "the document",
-        "this pdf",
-        "the pdf",
-
-        # Module / notes / course material
-        "module",
-        "modules",
-        "notes",
-        "lecture",
-        "lectures",
-        "course material",
-        "study material",
-        "course notes",
-
-        # Content questions
-        "what topics",
-        "which topics",
-        "topics covered",
-        "what is covered",
-        "what are covered",
-        "contents of",
-        "table of contents",
-        "summarize",
-        "summary",
-        "explain from",
-        "according to",
-        "according to the",
-        "from the document",
-        "from the pdf",
-        "from the notes",
-        "in the document",
-        "in the pdf",
-        "in the notes",
-
-        # Academic references
-        "chapter",
-        "chapters",
-        "section",
-        "sections",
-        "page",
-        "pages",
-        "slide",
-        "slides",
-
-        # Common document questions
-        "what does the document say",
-        "what does the pdf say",
-        "what does this module contain",
-        "what is this module about",
-        "explain this topic",
-        "explain the topic",
-        "explain the concept",
-        "according to my notes",
-    ]
-
-    for keyword in document_keywords:
-
-        if keyword in question_text:
-            return True
-
-    # --------------------------------------------------------
-    # 4. If PDF files exist, prefer document search
-    # --------------------------------------------------------
-    #
-    # This is important for your Document Assistant.
-    #
-    # If the user has uploaded PDFs and asks an academic
-    # question such as:
-    #
-    # "Explain gradient descent"
-    #
-    # we want Pinecone to search the uploaded material.
-    # --------------------------------------------------------
-
-    try:
-
-        pdf_files = list(
-            UPLOAD_DIR.glob("*.pdf")
-        )
-
-        if pdf_files:
-            return True
-
-    except Exception as error:
-
-        print(
-            "[ROUTER] Could not inspect uploads:",
-            repr(error)
-        )
-
-    return False
-
-    # --------------------------------------------------------
-    # Question-based detection
-    # --------------------------------------------------------
 
     text = question.lower().strip()
 
     document_keywords = [
-
         "pdf",
-
         "uploaded document",
-
         "uploaded pdf",
-
         "this document",
-
         "the document",
-
         "this pdf",
-
         "the pdf",
-
         "according to the document",
-
         "according to the pdf",
-
         "from the document",
-
         "from the pdf",
-
         "in the document",
-
         "in the pdf",
-
-        "document about",
-
-        "pdf about",
-
         "summarize the document",
-
+        "summarise the document",
         "summarize the pdf",
-
+        "summarise the pdf",
         "summary of the document",
-
         "summary of the pdf",
-
+        "main topic of this pdf",
+        "main topic of the pdf",
+        "main topic of this document",
+        "what is this pdf about",
+        "what is the pdf about",
+        "what is this document about",
+        "what does the document say",
+        "what does the pdf say",
         "chapter in the pdf",
-
         "page in the pdf",
-
     ]
 
-    for keyword in document_keywords:
+    return any(keyword in text for keyword in document_keywords)
 
-        if keyword in text:
 
-            return True
+# ============================================================
+# AUTH HELPERS
+# ============================================================
 
-    return False
+def get_current_user(
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization token is required.",
+        )
+
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization header.",
+        )
+
+    token = authorization.split(" ", 1)[1].strip()
+    payload = decode_access_token(token)
+
+    if not payload:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token.",
+        )
+
+    email = payload.get("email")
+    if not email:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid token.",
+        )
+
+    user = get_user_by_email(email)
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="User no longer exists.",
+        )
+
+    return {
+        "id": user["id"],
+        "name": user["name"],
+        "email": user["email"],
+    }
 
 
 # ============================================================
@@ -597,11 +396,6 @@ def is_document_question(
 
 @app.get("/health")
 def health():
-
-    document_count = len(
-        get_documents()
-    )
-
     vector_count = 0
 
     try:
@@ -613,15 +407,10 @@ def health():
         print("[HEALTH] Pinecone stats error:", repr(error))
 
     return {
-
         "status": "ok",
-
         "backend": "online",
-
-        "documents": document_count,
-
+        "documents": len(get_documents()),
         "chunks": vector_count,
-
     }
 
 
@@ -631,143 +420,188 @@ def health():
 
 @app.get("/")
 def root():
-
     return {
-
         "message": "Enterprise AI backend is running",
-
         "docs": "/docs",
-
         "health": "/health",
-
     }
 
 
 # ============================================================
-# DOCUMENTS
+# AUTH - REGISTER
+# ============================================================
+
+@app.post("/auth/register")
+def register(request: RegisterRequest):
+    email = request.email.lower().strip()
+
+    existing = get_user_by_email(email)
+
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists.",
+        )
+
+    try:
+        user = create_user(
+            name=request.name,
+            email=email,
+            password=request.password,
+        )
+    except Exception as error:
+        print("[AUTH] Register error:", repr(error))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Registration failed: {error}",
+        )
+
+    token = create_access_token(
+        user_id=user["id"],
+        email=user["email"],
+    )
+
+    return {
+        "message": "Registration successful.",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": user,
+    }
+
+
+# ============================================================
+# AUTH - LOGIN
+# ============================================================
+
+@app.post("/auth/login")
+def login(request: LoginRequest):
+    email = request.email.lower().strip()
+
+    user = get_user_by_email(email)
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+        )
+
+    try:
+        valid = verify_password(
+            request.password,
+            user["password_hash"],
+        )
+    except Exception as error:
+        print("[AUTH] Password verification error:", repr(error))
+        raise HTTPException(
+            status_code=500,
+            detail="Password verification failed.",
+        )
+
+    if not valid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+        )
+
+    token = create_access_token(
+        user_id=user["id"],
+        email=user["email"],
+    )
+
+    safe_user = {
+        "id": user["id"],
+        "name": user["name"],
+        "email": user["email"],
+    }
+
+    return {
+        "message": "Login successful.",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": safe_user,
+    }
+
+
+# ============================================================
+# AUTH - CURRENT USER
+# ============================================================
+
+@app.get("/auth/me")
+def current_user(user: Dict[str, Any] = Depends(get_current_user)):
+    return user
+
+
+# ============================================================
+# DOCUMENT LIST
 # ============================================================
 
 @app.get("/documents")
 def documents():
-
     return get_documents()
 
 
 # ============================================================
-# UPLOAD INTERNAL FUNCTION
+# PDF UPLOAD
 # ============================================================
 
-async def process_pdf_upload(
-    file: UploadFile,
-):
-
-    global vector_store
-
+async def process_pdf_upload(file: UploadFile):
     if not file:
-
         raise HTTPException(
             status_code=400,
             detail="No file was uploaded.",
         )
 
-    filename = file.filename or ""
+    original_filename = file.filename or ""
 
-    if not filename:
-
+    if not original_filename:
         raise HTTPException(
             status_code=400,
             detail="Filename is missing.",
         )
 
-    if not filename.lower().endswith(".pdf"):
-
+    if not original_filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are supported.",
         )
 
-    # --------------------------------------------------------
-    # Safe filename
-    # --------------------------------------------------------
+    safe_filename = Path(original_filename).name
 
-    safe_filename = Path(
-        filename
-    ).name
-
-    destination = (
-        UPLOAD_DIR / safe_filename
-    )
-
-    # --------------------------------------------------------
-    # Save uploaded PDF
-    # --------------------------------------------------------
-
-    try:
-
-        with open(
-            destination,
-            "wb",
-        ) as buffer:
-
-            shutil.copyfileobj(
-                file.file,
-                buffer,
-            )
-
-    except Exception as error:
-
-        print(
-            "[UPLOAD] Save error:",
-            repr(error),
+    if not safe_filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid filename.",
         )
 
+    destination = UPLOAD_DIR / safe_filename
+
+    # Save PDF.
+    try:
+        with open(destination, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as error:
+        print("[UPLOAD] Save error:", repr(error))
         raise HTTPException(
             status_code=500,
             detail=f"Could not save PDF: {error}",
         )
 
-    print(
-        "[UPLOAD] PDF saved:",
-        destination,
-    )
+    print("[UPLOAD] PDF saved:", destination)
 
-    # --------------------------------------------------------
-    # Extract chunks
-    # --------------------------------------------------------
-
+    # Extract text/chunks.
     try:
-
-        chunks = extract_pdf_chunks(
-            str(destination)
-        )
-
+        chunks = extract_pdf_chunks(str(destination))
     except Exception as error:
-
-        print(
-            "[PDF] Extraction error:",
-            repr(error),
-        )
-
-        # Delete broken PDF
-
-        try:
-            destination.unlink(
-                missing_ok=True
-            )
-        except Exception:
-            pass
+        print("[PDF] Extraction error:", repr(error))
+        destination.unlink(missing_ok=True)
 
         raise HTTPException(
             status_code=500,
             detail=f"Could not read PDF: {error}",
         )
 
-    print(
-        "[PDF] Extracted chunks:",
-        len(chunks),
-    )
-
     if not chunks:
+        destination.unlink(missing_ok=True)
 
         raise HTTPException(
             status_code=400,
@@ -777,113 +611,67 @@ async def process_pdf_upload(
             ),
         )
 
-    # --------------------------------------------------------
-    # PINECONE INDEXING
-    # --------------------------------------------------------
-    #
-    # Remove old vectors for this filename first so re-uploading
-    # the same PDF never leaves stale/duplicate vectors.
-    # --------------------------------------------------------
+    print(
+        f"[PDF] Extracted {len(chunks)} chunks from "
+        f"{safe_filename}"
+    )
 
+    # Remove old vectors for this exact filename.
+    # If the namespace does not exist yet, simply continue.
     try:
-
-        delete_pdf_vectors(
-            safe_filename
+        delete_pdf_vectors(safe_filename)
+    except Exception as error:
+        print(
+            "[PINECONE] Previous vectors could not be deleted "
+            "(safe to ignore for a new PDF):",
+            repr(error),
         )
 
+    # Index new chunks.
+    try:
         pinecone_count = index_pdf_chunks(
             filename=safe_filename,
             chunks=chunks,
         )
-
-        print(
-            f"[PINECONE] Indexed "
-            f"{pinecone_count} chunks for "
-            f"{safe_filename}"
-        )
-
     except Exception as error:
+        print("[PINECONE] Indexing error:", repr(error))
 
-        print(
-            "[PINECONE] Indexing error:",
-            repr(error),
-        )
-
-        try:
-            destination.unlink(
-                missing_ok=True
-            )
-        except Exception:
-            pass
-
+        # Do not delete the PDF if Pinecone fails; it can be
+        # re-indexed after fixing the service.
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"Could not index PDF in Pinecone: {error}"
-            ),
+            detail=f"Could not index PDF in Pinecone: {error}",
         )
 
+    print(
+        f"[PINECONE] Indexed {pinecone_count} chunks "
+        f"for {safe_filename}"
+    )
+
     return {
-
         "success": True,
-
-        "message": (
-            f"{safe_filename} uploaded and indexed successfully."
-        ),
-
+        "message": f"{safe_filename} uploaded and indexed successfully.",
         "filename": safe_filename,
-
-        "chunks": len(chunks),
-
+        "original_name": original_filename,
+        "chunks": pinecone_count,
+        "number_of_chunks": pinecone_count,
         "documents": get_documents(),
-
     }
 
 
-# ============================================================
-# UPLOAD ROUTE
-# ============================================================
-
 @app.post("/upload")
-async def upload_pdf(
-    file: UploadFile = File(...)
-):
+async def upload_pdf(file: UploadFile = File(...)):
+    return await process_pdf_upload(file)
 
-    return await process_pdf_upload(
-        file
-    )
-
-
-# ============================================================
-# UPLOAD-PDF ROUTE
-# ============================================================
 
 @app.post("/upload-pdf")
-async def upload_pdf_alias(
-    file: UploadFile = File(...)
-):
+async def upload_pdf_alias(file: UploadFile = File(...)):
+    return await process_pdf_upload(file)
 
-    return await process_pdf_upload(
-        file
-    )
-
-
-# ============================================================
-# FRONTEND COMPATIBILITY ROUTE
-#
-# YOUR FRONTEND CURRENTLY USES:
-#
-# POST /documents/upload
-# ============================================================
 
 @app.post("/documents/upload")
-async def upload_pdf_documents(
-    file: UploadFile = File(...)
-):
-
-    return await process_pdf_upload(
-        file
-    )
+async def upload_pdf_documents(file: UploadFile = File(...)):
+    return await process_pdf_upload(file)
 
 
 # ============================================================
@@ -892,11 +680,6 @@ async def upload_pdf_documents(
 
 @app.delete("/documents/{document_id:path}")
 def delete_document(document_id: str):
-
-    global vector_store
-
-    # The frontend sends the stored filename as the document ID.
-    # FastAPI gives us the decoded path value here.
     document_name = Path(document_id).name
 
     if not document_name.lower().endswith(".pdf"):
@@ -907,69 +690,30 @@ def delete_document(document_id: str):
 
     document_path = UPLOAD_DIR / document_name
 
-    print("[DELETE PDF] Requested:", document_name)
-    print("[DELETE PDF] Path:", document_path)
-
     if not document_path.exists():
         raise HTTPException(
             status_code=404,
             detail=f"Document not found: {document_name}",
         )
 
-    # --------------------------------------------------------
-    # DELETE PDF VECTORS FROM PINECONE
-    # --------------------------------------------------------
-
+    # Delete Pinecone vectors first.
     try:
-
-        delete_pdf_vectors(
-            document_name
-        )
-
-        print(
-            "[DELETE PDF] Pinecone vectors deleted:",
-            document_name,
-        )
-
+        delete_pdf_vectors(document_name)
     except Exception as error:
-
         print(
-            "[DELETE PDF] Pinecone deletion error:",
+            "[DELETE] Pinecone vector deletion warning:",
             repr(error),
         )
 
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Could not remove the PDF from the "
-                f"document index: {error}"
-            ),
-        )
-
-    # --------------------------------------------------------
-    # DELETE THE PHYSICAL PDF
-    # --------------------------------------------------------
-
+    # Delete physical PDF.
     try:
-
         document_path.unlink()
-
     except Exception as error:
-
-        print(
-            "[DELETE PDF] File deletion error:",
-            repr(error),
-        )
-
+        print("[DELETE] File deletion error:", repr(error))
         raise HTTPException(
             status_code=500,
             detail=f"Could not delete PDF: {error}",
         )
-
-    print(
-        "[DELETE PDF] Successfully deleted:",
-        document_name,
-    )
 
     return {
         "success": True,
@@ -987,25 +731,21 @@ def delete_document(document_id: str):
 def search_documents(
     q: str,
     top_k: int = 6,
+    filename: Optional[str] = None,
 ):
-
     if not q.strip():
         return []
 
-    try:
+    top_k = max(1, min(int(top_k), 20))
 
+    try:
         return search_pinecone(
             q,
             top_k=top_k,
+            filename=filename,
         )
-
     except Exception as error:
-
-        print(
-            "[PINECONE SEARCH] Error:",
-            repr(error),
-        )
-
+        print("[SEARCH] Error:", repr(error))
         raise HTTPException(
             status_code=500,
             detail=f"Document search failed: {error}",
@@ -1013,177 +753,23 @@ def search_documents(
 
 
 # ============================================================
-# ASK
-# ============================================================
-# ============================================================
-# AUTHENTICATION
+# ASK QUESTION
 # ============================================================
 
-@app.post("/auth/register")
-def register(
-    request: AuthRequest,
-):
-
-    if not request.name or not request.name.strip():
-
-        raise HTTPException(
-            status_code=400,
-            detail="Name is required.",
-        )
-
-    if len(request.password) < 6:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Password must be at least 6 characters.",
-        )
-
-    existing_user = get_user_by_email(
-        request.email
-    )
-
-    if existing_user:
-
-        raise HTTPException(
-            status_code=400,
-            detail="An account with this email already exists.",
-        )
-
-    user = create_user(
-        name=request.name,
-        email=request.email,
-        password=request.password,
-    )
-
-    token = create_access_token(
-        user_id=user["id"],
-        email=user["email"],
-    )
-
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": user,
-    }
-
-
-@app.post("/auth/login")
-def login(
-    request: AuthRequest,
-):
-
-    user = get_user_by_email(
-        request.email
-    )
-
-    if not user:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid email or password.",
-        )
-
-    if not verify_password(
-        request.password,
-        user["password_hash"],
-    ):
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid email or password.",
-        )
-
-    token = create_access_token(
-        user_id=user["id"],
-        email=user["email"],
-    )
-
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": user["id"],
-            "name": user["name"],
-            "email": user["email"],
-        },
-    }
-
-
-@app.get("/auth/me")
-def current_user(
-    authorization: Optional[str] = Header(
-        None
-    ),
-):
-
-    if not authorization:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required.",
-        )
-
-    if not authorization.lower().startswith(
-        "bearer "
-    ):
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authentication header.",
-        )
-
-    token = authorization[7:].strip()
-
-    payload = decode_access_token(
-        token
-    )
-
-    if not payload:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired token.",
-        )
-
-    user = get_user_by_email(
-        payload.get("email", "")
-    )
-
-    if not user:
-
-        raise HTTPException(
-            status_code=401,
-            detail="User not found.",
-        )
-
-    return {
-        "id": user["id"],
-        "name": user["name"],
-        "email": user["email"],
-    }
 @app.post("/ask")
-def ask_question(
-    request: AskRequest,
-):
-
-    global vector_store
-
+def ask_question(request: AskRequest):
     question = request.question.strip()
 
     if not question:
-
         raise HTTPException(
             status_code=400,
             detail="Question cannot be empty.",
         )
 
-    print(
-        "[ASK]",
-        question,
-    )
+    print("[ASK]", question)
 
     # --------------------------------------------------------
-    # CHAT
+    # Chat
     # --------------------------------------------------------
 
     chat = get_or_create_chat(
@@ -1192,43 +778,34 @@ def ask_question(
     )
 
     # --------------------------------------------------------
-    # Build history
+    # History
     # --------------------------------------------------------
 
-    history = request.history
-
-    if history is None:
-
+    if request.history is not None:
+        history = request.history
+    else:
         history = []
 
-        for message in chat.get(
-            "messages",
-            [],
-        ):
+        for message in chat.get("messages", []):
+            role = message.get("role")
+            content = message.get("content")
 
-            role = message.get(
-                "role"
-            )
+            if (
+                role in {"user", "assistant"}
+                and content
+            ):
+                history.append(
+                    {
+                        "role": role,
+                        "content": content,
+                    }
+                )
 
-            content = message.get(
-                "content"
-            )
-
-            if role in {
-                "user",
-                "assistant",
-            } and content:
-
-                history.append({
-
-                    "role": role,
-
-                    "content": content,
-
-                })
+    # Keep prompt size reasonable.
+    history = history[-10:]
 
     # --------------------------------------------------------
-    # Add user's message
+    # Save user message
     # --------------------------------------------------------
 
     add_chat_message(
@@ -1236,82 +813,65 @@ def ask_question(
         "user",
         question,
     )
-
     save_chats()
 
     # --------------------------------------------------------
-    # Decide route
+    # Route
     # --------------------------------------------------------
 
     document_route = is_document_question(
-        question,
-        request.route,
-        request.mode,
-    )
-
-    print(
-        "[ROUTER]",
-        question,
+        question=question,
+        route=request.route,
+        mode=request.mode,
+        filename=request.filename,
     )
 
     print(
         "[ROUTER] ->",
-        "DOCUMENT"
-        if document_route
-        else "CONVERSATION",
+        "DOCUMENT" if document_route else "CONVERSATION",
     )
 
     # ========================================================
-    # DOCUMENT QUESTION
+    # DOCUMENT RAG
     # ========================================================
 
     if document_route:
-
         try:
+            top_k = 6
 
             results = search_pinecone(
-                question,
-                top_k=6,
+                query=question,
+                top_k=top_k,
                 filename=request.filename,
             )
 
         except Exception as error:
-
-            print(
-                "[PINECONE SEARCH ERROR]",
-                repr(error),
-            )
+            print("[PINECONE SEARCH ERROR]", repr(error))
 
             answer = (
                 "I couldn't search the uploaded document "
                 "because the document index encountered an error."
             )
-
-            sources = []
+            sources: List[Dict[str, Any]] = []
 
         else:
-
             if not results:
-
                 answer = (
-                    "There are no indexed PDF documents available. "
-                    "Please upload a PDF first."
+                    "There are no relevant indexed PDF passages "
+                    "available for this question."
                 )
-
                 sources = []
 
             else:
-
-                context_parts = []
+                context_parts: List[str] = []
                 sources = []
 
                 for result in results:
-
-                    result_text = str(
+                    text = str(
                         result.get("text", "")
                     ).strip()
 
-                    if not result_text:
+                    if not text:
                         continue
 
                     filename = result.get(
@@ -1330,79 +890,60 @@ def ask_question(
                     )
 
                     context_parts.append(
-                        f"""
-Document: {filename}
-Page: {page}
-
-{result_text}
-"""
+                        f"Document: {filename}\n"
+                        f"Page: {page}\n\n"
+                        f"{text}"
                     )
 
                     sources.append(
                         {
                             "filename": filename,
                             "page": page,
-                            "text": result_text,
+                            "text": text,
                             "score": score,
                         }
                     )
 
-                context = "\n".join(
+                context = "\n\n---\n\n".join(
                     context_parts
                 )
 
-                try:
-
-                    if context.strip():
-
+                if not context.strip():
+                    answer = (
+                        "I couldn't find relevant information "
+                        "in the uploaded PDF."
+                    )
+                else:
+                    try:
                         answer = generate_document_answer(
                             question=question,
                             context=context,
                             history=history,
                         )
-
-                    else:
-
-                        answer = (
-                            "I couldn't find any relevant "
-                            "information in the uploaded PDF."
+                    except Exception as error:
+                        print(
+                            "[DOCUMENT LLM ERROR]",
+                            repr(error),
                         )
 
-                except Exception as error:
-
-                    print(
-                        "[DOCUMENT LLM ERROR]",
-                        repr(error),
-                    )
-
-                    answer = (
-                        "I found the uploaded document, "
-                        "but I could not generate an answer "
-                        "from it right now."
-                    )
+                        answer = (
+                            "I found relevant information in the "
+                            "PDF, but the AI could not generate "
+                            "the final answer right now."
+                        )
 
     # ========================================================
-    # NORMAL CONVERSATION
+    # NORMAL CHAT
     # ========================================================
 
     else:
-
         try:
-
             answer = generate_chat_answer(
-
                 question=question,
-
                 history=history,
-
             )
-
         except Exception as error:
-
-            print(
-                "[CHAT LLM ERROR]",
-                repr(error),
-            )
+            print("[CHAT LLM ERROR]", repr(error))
 
             raise HTTPException(
                 status_code=500,
@@ -1411,9 +952,9 @@ Page: {page}
 
         sources = []
 
-    # ========================================================
-    # SAVE ASSISTANT RESPONSE
-    # ========================================================
+    # --------------------------------------------------------
+    # Save assistant response
+    # --------------------------------------------------------
 
     add_chat_message(
         chat,
@@ -1424,24 +965,15 @@ Page: {page}
 
     save_chats()
 
-    # ========================================================
-    # RESPONSE
-    # ========================================================
-
     return {
-
         "answer": answer,
-
         "sources": sources,
-
         "chat_id": chat["id"],
-
         "route": (
             "DOCUMENT"
             if document_route
             else "CONVERSATION"
         ),
-
     }
 
 
@@ -1451,83 +983,46 @@ Page: {page}
 
 @app.get("/chats")
 def get_chats():
-
     result = []
 
     for chat in chats.values():
-
-        result.append({
-
-            "id": chat.get(
-                "id"
-            ),
-
-            "title": chat.get(
-                "title",
-                "New chat",
-            ),
-
-            "created_at": chat.get(
-                "created_at"
-            ),
-
-            "updated_at": chat.get(
-                "updated_at"
-            ),
-
-        })
+        result.append(
+            {
+                "id": chat.get("id"),
+                "title": chat.get("title", "New chat"),
+                "created_at": chat.get("created_at"),
+                "updated_at": chat.get("updated_at"),
+            }
+        )
 
     result.sort(
-        key=lambda x: x.get(
-            "updated_at",
-            "",
-        ),
+        key=lambda item: item.get("updated_at", ""),
         reverse=True,
     )
 
     return result
 
 
-# ============================================================
-# CREATE CHAT
-# ============================================================
-
 @app.post("/chats")
 def create_new_chat(
     request: ChatCreateRequest = ChatCreateRequest(),
 ):
-
     chat = create_chat(
-        first_message=(
-            request.title
-            or "New chat"
-        )
+        first_message=request.title or "New chat"
     )
 
     if request.title:
-
         chat["title"] = request.title
-
         save_chats()
 
     return chat
 
 
-# ============================================================
-# GET SINGLE CHAT
-# ============================================================
-
 @app.get("/chats/{chat_id}")
-def get_chat(
-    chat_id: str,
-):
-
-    chat = chats.get(
-        chat_id
-    )
+def get_chat(chat_id: str):
+    chat = chats.get(chat_id)
 
     if not chat:
-
         raise HTTPException(
             status_code=404,
             detail="Chat not found.",
@@ -1536,32 +1031,21 @@ def get_chat(
     return chat
 
 
-# ============================================================
-# DELETE CHAT
-# ============================================================
-
 @app.delete("/chats/{chat_id}")
-def delete_chat(
-    chat_id: str,
-):
-
+def delete_chat(chat_id: str):
     if chat_id not in chats:
-
         raise HTTPException(
             status_code=404,
             detail="Chat not found.",
         )
 
     del chats[chat_id]
-
     save_chats()
 
     return {
-
         "success": True,
-
         "message": "Chat deleted.",
-
+        "id": chat_id,
     }
 
 
@@ -1571,140 +1055,56 @@ def delete_chat(
 
 @app.on_event("startup")
 def startup():
+    print("=" * 60)
+    print("Enterprise AI starting...")
+    print("=" * 60)
 
-    global vector_store
-
-    print(
-        "=================================================="
-    )
-
-    print(
-        "Enterprise AI starting..."
-    )
-
-    print(
-        "=================================================="
-    )
-
-    # --------------------------------------------------------
-    # Load chats
-    # --------------------------------------------------------
-
-    load_chats()
-    init_auth_db()
-
-    print(
-        "[AUTH] Authentication database ready."
-
-    )
-    
-
-    print(
-        "[CHATS] Loaded:",
-        len(chats),
-    )
-
-    # --------------------------------------------------------
-    # Initialize vector store
-    # --------------------------------------------------------
-
+    # Authentication database.
     try:
-
-        print(
-            "[VECTOR] Initializing vector store..."
-        )
-
-        vector_store = VectorStore(
-            folder_path=str(
-                VECTOR_DB_DIR
-            )
-        )
-
-        print(
-            "[VECTOR] Loaded:",
-            len(
-                vector_store.records
-            ),
-            "chunks",
-        )
-
+        init_auth_db()
+        print("[AUTH] Authentication database ready.")
     except Exception as error:
+        print("[AUTH] Database initialization error:", repr(error))
+        raise
 
-        print(
-            "[VECTOR] Initialization error:",
-            repr(error),
-        )
+    # Chat history.
+    load_chats()
+    print("[CHATS] Loaded:", len(chats))
 
-        # ----------------------------------------------------
-        # Do NOT kill backend.
-        # Start empty vector store if needed.
-        # ----------------------------------------------------
-
-        try:
-
-            vector_store = VectorStore(
-                folder_path=str(
-                    VECTOR_DB_DIR
-                )
-            )
-
-        except Exception as second_error:
-
-            print(
-                "[VECTOR] Could not initialize:",
-                repr(second_error),
-            )
-
-            vector_store = None
-
-    # --------------------------------------------------------
-    # Pinecone is now the document-search source of truth.
-    # Do not rebuild the local vector database on startup.
-    # --------------------------------------------------------
+    # Do NOT initialize VectorStore here.
+    # Do NOT load SentenceTransformer here.
+    # Pinecone + FastEmbed are handled by pinecone_store.py.
 
     try:
-
         stats = get_pinecone_stats()
 
         print(
-            "[PINECONE] Connected."
+            "[PINECONE] Connected.",
+            "vectors=",
+            getattr(stats, "total_vector_count", 0),
         )
-
-        print(
-            "[PINECONE] Vector count:",
-            getattr(
-                stats,
-                "total_vector_count",
-                0,
-            ),
-        )
-
     except Exception as error:
-
+        # Keep backend alive so /health and auth can still respond.
         print(
-            "[PINECONE] Startup check failed:",
+            "[PINECONE] Startup stats warning:",
             repr(error),
         )
 
-    print(
-        "=================================================="
-    )
-
-    print(
-        "Enterprise AI backend ready."
-    )
-
-    print(
-        "Health: http://127.0.0.1:8000/health"
-    )
-
-    print(
-        "Docs:   http://127.0.0.1:8000/docs"
-    )
-
-    print(
-        "=================================================="
-    )
+    print("=" * 60)
+    print("Enterprise AI backend ready.")
+    print("=" * 60)
 
 
 # ============================================================
+# LOCAL ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "backend.app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+    )
