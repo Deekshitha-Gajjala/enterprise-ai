@@ -1,235 +1,159 @@
-import os
+# ============================================================
+# UPLOAD PDF TO PINECONE
+# backend/app/upload_to_pinecone.py
+# ============================================================
+
 from pathlib import Path
 
-from dotenv import load_dotenv
-from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 
 from chunker import split_text
+from pinecone_store import index_pdf_chunks, get_pinecone_stats
 
 
 # ============================================================
-# CONFIGURATION
+# FIND PDF
 # ============================================================
 
-load_dotenv()
+UPLOADS_DIR = Path("uploads")
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-
-if not PINECONE_API_KEY:
-    raise ValueError(
-        "PINECONE_API_KEY not found in .env"
-    )
-
-INDEX_NAME = "enterprise-ai"
-
-PDF_PATH = Path(
-    "uploads/Module_1_DL_1.pdf"
+pdf_files = list(
+    UPLOADS_DIR.glob("*.pdf")
 )
 
-
-# ============================================================
-# CHECK PDF
-# ============================================================
-
-if not PDF_PATH.exists():
+if not pdf_files:
     raise FileNotFoundError(
-        f"PDF not found: {PDF_PATH}"
+        "No PDF files found in uploads/"
     )
 
 print(
-    "PDF found:",
-    PDF_PATH
+    f"Found {len(pdf_files)} PDF file(s)."
 )
 
 
 # ============================================================
-# CONNECT TO PINECONE
+# PROCESS EACH PDF
 # ============================================================
 
-print("Connecting to Pinecone...")
-
-pc = Pinecone(
-    api_key=PINECONE_API_KEY
-)
-
-index = pc.Index(
-    INDEX_NAME
-)
-
-print("Connected to Pinecone.")
+total_uploaded = 0
 
 
-# ============================================================
-# LOAD EMBEDDING MODEL
-# ============================================================
+for pdf_path in pdf_files:
 
-print()
-print("Loading embedding model...")
-
-model = SentenceTransformer(
-    "sentence-transformers/all-MiniLM-L6-v2"
-)
-
-print("Embedding model loaded.")
-
-
-# ============================================================
-# READ PDF
-# ============================================================
-
-print()
-print("Reading PDF...")
-
-reader = PdfReader(
-    str(PDF_PATH)
-)
-
-all_chunks = []
-
-
-# ============================================================
-# EXTRACT + CHUNK PDF
-# ============================================================
-
-for page_number, page in enumerate(
-    reader.pages,
-    start=1,
-):
-
-    text = page.extract_text() or ""
-
-    text = " ".join(
-        text.split()
-    )
-
-    if not text:
-        continue
-
-    chunks = split_text(
-        text,
-        chunk_size=1000,
-        overlap=200,
-    )
-
-    for chunk_number, chunk in enumerate(
-        chunks
-    ):
-
-        all_chunks.append(
-            {
-                "text": chunk,
-                "filename": PDF_PATH.name,
-                "page": page_number,
-                "chunk": chunk_number,
-            }
-        )
-
-
-print(
-    f"Extracted {len(all_chunks)} chunks."
-)
-
-
-if not all_chunks:
-    raise ValueError(
-        "No text chunks were extracted from the PDF."
-    )
-
-
-# ============================================================
-# CREATE EMBEDDINGS
-# ============================================================
-
-print()
-print("Creating embeddings...")
-
-texts = [
-    item["text"]
-    for item in all_chunks
-]
-
-embeddings = model.encode(
-    texts,
-    normalize_embeddings=True,
-    convert_to_numpy=True,
-    show_progress_bar=True,
-)
-
-print(
-    "Embedding shape:",
-    embeddings.shape
-)
-
-
-# ============================================================
-# PREPARE PINECONE RECORDS
-# ============================================================
-
-records = []
-
-for item, embedding in zip(
-    all_chunks,
-    embeddings,
-):
-
-    record = {
-        "id": (
-            f"module1-page-"
-            f"{item['page']}-"
-            f"chunk-"
-            f"{item['chunk']}"
-        ),
-
-        "values": embedding.tolist(),
-
-        "metadata": {
-            "text": item["text"],
-            "filename": item["filename"],
-            "page": item["page"],
-            "chunk": item["chunk"],
-        },
-    }
-
-    records.append(
-        record
-    )
-
-
-# ============================================================
-# UPLOAD TO PINECONE
-# ============================================================
-
-print()
-print(
-    f"Uploading {len(records)} vectors..."
-)
-
-batch_size = 100
-
-for start in range(
-    0,
-    len(records),
-    batch_size,
-):
-
-    end = min(
-        start + batch_size,
-        len(records),
-    )
-
-    batch = records[
-        start:end
-    ]
-
-    index.upsert(
-        vectors=batch
+    print()
+    print(
+        "========================================"
     )
 
     print(
-        f"Uploaded {end}/{len(records)}"
+        f"Processing: {pdf_path.name}"
     )
+
+    print(
+        "========================================"
+    )
+
+
+    # --------------------------------------------------------
+    # READ PDF
+    # --------------------------------------------------------
+
+    reader = PdfReader(
+        str(pdf_path)
+    )
+
+    chunks = []
+
+
+    # --------------------------------------------------------
+    # EXTRACT + CHUNK
+    # --------------------------------------------------------
+
+    for page_number, page in enumerate(
+        reader.pages,
+        start=1,
+    ):
+
+        try:
+
+            raw_text = (
+                page.extract_text()
+                or ""
+            )
+
+        except Exception as error:
+
+            print(
+                f"Could not read page "
+                f"{page_number}: {error}"
+            )
+
+            continue
+
+
+        text = " ".join(
+            raw_text.split()
+        )
+
+
+        if not text:
+            continue
+
+
+        page_chunks = split_text(
+            text,
+            chunk_size=1000,
+            overlap=200,
+        )
+
+
+        for chunk_number, chunk in enumerate(
+            page_chunks
+        ):
+
+            chunks.append(
+                {
+                    "text": chunk,
+                    "filename": pdf_path.name,
+                    "page": page_number,
+                    "chunk": chunk_number,
+                }
+            )
+
+
+    print(
+        f"Extracted {len(chunks)} chunks."
+    )
+
+
+    if not chunks:
+
+        print(
+            f"Skipping {pdf_path.name}: "
+            "no text found."
+        )
+
+        continue
+
+
+    # --------------------------------------------------------
+    # INDEX USING FASTEMBED
+    # --------------------------------------------------------
+
+    uploaded = index_pdf_chunks(
+        filename=pdf_path.name,
+        chunks=chunks,
+    )
+
+
+    print(
+        f"[PINECONE] Indexed "
+        f"{uploaded} chunks for "
+        f"{pdf_path.name}"
+    )
+
+
+    total_uploaded += uploaded
 
 
 # ============================================================
@@ -237,15 +161,32 @@ for start in range(
 # ============================================================
 
 print()
-print("==============================")
-print("PDF UPLOAD TO PINECONE COMPLETE")
-print("==============================")
+print(
+    "========================================"
+)
 
-stats = index.describe_index_stats()
+print(
+    "PDF UPLOAD TO PINECONE COMPLETE"
+)
+
+print(
+    "========================================"
+)
 
 print()
-print("Pinecone statistics:")
-print(stats)
+print(
+    "Total vectors uploaded:",
+    total_uploaded,
+)
+
+print()
+print(
+    "Pinecone statistics:"
+)
+
+print(
+    get_pinecone_stats()
+)
 
 print()
 print("Done!")

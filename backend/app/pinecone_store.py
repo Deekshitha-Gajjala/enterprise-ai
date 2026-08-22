@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 
 # ============================================================
@@ -32,7 +32,8 @@ if not PINECONE_API_KEY:
 
 INDEX_NAME = "enterprise-ai"
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# Lightweight ONNX-based embedding model
+MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 DIMENSION = 384
 
@@ -62,16 +63,54 @@ print(
 # ============================================================
 
 print(
-    "[PINECONE] Loading embedding model..."
+    "[PINECONE] Loading lightweight embedding model..."
 )
 
-embedding_model = SentenceTransformer(
-    MODEL_NAME
+embedding_model = TextEmbedding(
+    model_name=MODEL_NAME
 )
 
 print(
     "[PINECONE] Embedding model loaded."
 )
+
+
+# ============================================================
+# EMBEDDING HELPER
+# ============================================================
+
+def create_embeddings(
+    texts: List[str],
+):
+    """
+    Create normalized embeddings using FastEmbed.
+
+    Returns:
+        List[List[float]]
+    """
+
+    if not texts:
+        return []
+
+    embeddings = list(
+        embedding_model.embed(texts)
+    )
+
+    result = []
+
+    for embedding in embeddings:
+
+        vector = embedding.tolist()
+
+        if len(vector) != DIMENSION:
+            raise ValueError(
+                f"Expected {DIMENSION}-dimensional "
+                f"embedding, got {len(vector)}"
+            )
+
+        result.append(vector)
+
+    return result
 
 
 # ============================================================
@@ -108,7 +147,12 @@ def index_pdf_chunks(
         return 0
 
     texts = [
-        str(chunk.get("text", "")).strip()
+        str(
+            chunk.get(
+                "text",
+                "",
+            )
+        ).strip()
         for chunk in chunks
     ]
 
@@ -135,21 +179,12 @@ def index_pdf_chunks(
         f"{len(valid_items)} chunks..."
     )
 
-    embeddings = embedding_model.encode(
+    embeddings = create_embeddings(
         [
             item[1]
             for item in valid_items
-        ],
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
+        ]
     )
-
-    if embeddings.shape[1] != DIMENSION:
-        raise ValueError(
-            f"Expected {DIMENSION}-dimensional "
-            f"embeddings, got {embeddings.shape[1]}"
-        )
 
     vectors = []
 
@@ -179,7 +214,7 @@ def index_pdf_chunks(
             {
                 "id": vector_id,
 
-                "values": embedding.tolist(),
+                "values": embedding,
 
                 "metadata": {
                     "text": text,
@@ -250,10 +285,6 @@ def delete_pdf_vectors(
 # SEARCH
 # ============================================================
 
-# ============================================================
-# SEARCH
-# ============================================================
-
 def search_pinecone(
     query: str,
     top_k: int = 6,
@@ -263,47 +294,20 @@ def search_pinecone(
     if not query or not query.strip():
         return []
 
-    # --------------------------------------------------------
-    # Create query embedding
-    # --------------------------------------------------------
-
-    query_embedding = embedding_model.encode(
-        [query],
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )[0]
-
-    if query_embedding.shape[0] != DIMENSION:
-
-        raise ValueError(
-            f"Expected query dimension "
-            f"{DIMENSION}, got "
-            f"{query_embedding.shape[0]}"
-        )
-
-    # --------------------------------------------------------
-    # Retrieve MORE candidates than we finally need.
-    #
-    # This is important when multiple PDFs are uploaded.
-    # --------------------------------------------------------
-
-    candidate_k = max(
-        int(top_k) * 5,
-        30,
+    query_embeddings = create_embeddings(
+        [query]
     )
 
+    if not query_embeddings:
+        return []
+
+    query_embedding = query_embeddings[0]
+
     search_kwargs = {
-        "vector": query_embedding.tolist(),
-
-        "top_k": candidate_k,
-
+        "vector": query_embedding,
+        "top_k": int(top_k),
         "include_metadata": True,
     }
-
-    # --------------------------------------------------------
-    # Optional filename filter
-    # --------------------------------------------------------
 
     if filename:
 
@@ -313,19 +317,11 @@ def search_pinecone(
             }
         }
 
-    # --------------------------------------------------------
-    # Search Pinecone
-    # --------------------------------------------------------
-
     result = index.query(
         **search_kwargs
     )
 
     matches = []
-
-    # --------------------------------------------------------
-    # Convert Pinecone results
-    # --------------------------------------------------------
 
     for match in result.matches:
 
@@ -334,28 +330,17 @@ def search_pinecone(
             or {}
         )
 
-        text = str(
-            metadata.get(
-                "text",
-                "",
-            )
-        ).strip()
-
-        matched_filename = str(
-            metadata.get(
-                "filename",
-                "",
-            )
-        )
-
-        if not text:
-            continue
-
         matches.append(
             {
-                "text": text,
+                "text": metadata.get(
+                    "text",
+                    "",
+                ),
 
-                "filename": matched_filename,
+                "filename": metadata.get(
+                    "filename",
+                    "",
+                ),
 
                 "page": metadata.get(
                     "page",
@@ -372,121 +357,7 @@ def search_pinecone(
             }
         )
 
-    # --------------------------------------------------------
-    # Filename-aware reranking
-    #
-    # This helps when the user's question mentions a
-    # particular uploaded PDF/module.
-    #
-    # Example:
-    #
-    # "What is the ML Unit 2 PDF about?"
-    #
-    # A filename such as:
-    #
-    # ML Unit 2.2 Solved Problems.pdf
-    #
-    # receives a boost.
-    # --------------------------------------------------------
-
-    query_words = set(
-        query.lower()
-        .replace("_", " ")
-        .replace("-", " ")
-        .replace(".", " ")
-        .split()
-    )
-
-    # Words that are too generic to help identify a PDF.
-    ignored_words = {
-        "what",
-        "is",
-        "the",
-        "a",
-        "an",
-        "about",
-        "explain",
-        "tell",
-        "me",
-        "this",
-        "that",
-        "pdf",
-        "document",
-        "according",
-        "to",
-        "in",
-        "of",
-        "and",
-        "or",
-        "please",
-    }
-
-    useful_query_words = {
-        word
-        for word in query_words
-        if word not in ignored_words
-        and len(word) > 1
-    }
-
-    for match in matches:
-
-        filename_text = (
-            match["filename"]
-            .lower()
-            .replace("_", " ")
-            .replace("-", " ")
-            .replace(".", " ")
-        )
-
-        filename_words = set(
-            filename_text.split()
-        )
-
-        filename_overlap = (
-            useful_query_words
-            & filename_words
-        )
-
-        # Small but meaningful filename boost.
-        match["rerank_score"] = (
-            match["score"]
-            + (
-                0.12
-                * len(filename_overlap)
-            )
-        )
-
-    # --------------------------------------------------------
-    # Sort using reranked score
-    # --------------------------------------------------------
-
-    matches.sort(
-        key=lambda item: item[
-            "rerank_score"
-        ],
-        reverse=True,
-    )
-
-    # --------------------------------------------------------
-    # Return only requested number of results
-    # --------------------------------------------------------
-
-    final_matches = matches[
-        :int(top_k)
-    ]
-
-    # --------------------------------------------------------
-    # Remove internal reranking field
-    # --------------------------------------------------------
-
-    for match in final_matches:
-
-        match.pop(
-            "rerank_score",
-            None,
-        )
-
-    return final_matches
+    return matches
 
 
 # ============================================================
