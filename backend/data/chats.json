@@ -1,0 +1,91 @@
+[
+  {
+    "id": "d19f18fb-100a-4d8f-9423-ddfcf97bb6d9",
+    "title": "i have uploaded a pdf",
+    "messages": [
+      {
+        "role": "user",
+        "content": "i have uploaded a pdf"
+      },
+      {
+        "role": "assistant",
+        "content": "It looks like you've uploaded a PDF. Is there anything specific you'd like to know or ask about it?"
+      }
+    ],
+    "updated_at": "2026-08-21T21:55:13.826688"
+  },
+  {
+    "id": "7dd9457c-a36c-443a-b03e-68413b248242",
+    "title": "hi",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      },
+      {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      {
+        "role": "user",
+        "content": "how are you"
+      },
+      {
+        "role": "assistant",
+        "content": "I'm doing well, thank you for asking! How are you?"
+      },
+      {
+        "role": "user",
+        "content": "i am pretty bad"
+      },
+      {
+        "role": "assistant",
+        "content": "I'm really sorry to hear that you're feeling this way. 😔\n\nI'm here to listen if you want to talk about what's going on, or we can chat about something completely different to help take your mind off things for a bit. Sometimes just venting helps, or sometimes a distraction is exactly what you need.\n\nWhat do you think would be best for you right now?"
+      }
+    ],
+    "updated_at": "2026-08-21T21:56:10.960678"
+  },
+  {
+    "id": "0e430413-bff0-46cf-8ae5-dd5952d1da46",
+    "title": "hi",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      },
+      {
+        "role": "assistant",
+        "content": "Hello! How are you doing today? Is there anything I can help you with?"
+      },
+      {
+        "role": "user",
+        "content": "i have uploaded a pdf"
+      },
+      {
+        "role": "assistant",
+        "content": "I don't see any file attached to your message. Could you please try uploading the PDF again? Once it's uploaded, I'll be happy to help you with it!"
+      },
+      {
+        "role": "user",
+        "content": "what is the uploaded pdf about"
+      },
+      {
+        "role": "user",
+        "content": "hi"
+      },
+      {
+        "role": "assistant",
+        "content": "Hello! It seems like there might be a technical issue, as I am not able to see or access any uploaded files in our conversation.\n\nIf you have a PDF you'd like me to help with, could you please:\n1. **Try uploading it again** (if the platform supports file uploads).\n2. **Copy and paste the text** from the PDF into the chat.\n3. **Summarize the content** or tell me what specific questions you have about it.\n\nI'm here to help once I can access the information!"
+      },
+      {
+        "role": "user",
+        "content": "can you see the uploaded pdf"
+      },
+      {
+        "role": "assistant",
+        "content": "There are no uploaded documents available. Please upload a PDF first."
+      }
+    ],
+    "updated_at": "2026-08-21T22:17:37.402311"
+  }
+]

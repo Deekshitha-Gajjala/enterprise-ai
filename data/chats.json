@@ -1,0 +1,58 @@
+{
+  "0fa99753-577c-4fa0-ab14-49581fff65da": {
+    "id": "0fa99753-577c-4fa0-ab14-49581fff65da",
+    "title": "New chat",
+    "created_at": "2026-08-22T23:24:26.587359",
+    "updated_at": "2026-08-22T23:24:36.529759",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi",
+        "timestamp": "2026-08-22T23:24:34.252964"
+      },
+      {
+        "role": "assistant",
+        "content": "Hello! How can I help you today? If you have any questions about the uploaded document or need help with anything else, just let me know!",
+        "timestamp": "2026-08-22T23:24:36.529759",
+        "sources": [
+          {
+            "filename": "ML_Unit2_2_Solved Problems.pdf",
+            "page": 4,
+            "text": "Sample Problems Based on CNN School of Computer Science and System Engineering Step 3 Window 3 9 0 4 8 Maximum = 9 Step 4 Window 4 2 5 1 3 Maximum = 5 Output 7 8 9 5",
+            "score": 0.137004852
+          },
+          {
+            "filename": "ML_Unit2_2_Solved Problems.pdf",
+            "page": 8,
+            "text": "Sample Problems Based on CNN School of Computer Science and System Engineering Sol. (b) Output after Pooling Pooling halves height and width. 32/2 = 16 Output 16 × 16 × 16 (c) Number of Output Channels Each filter produces one feature map. Number of filters = 16 Therefore, Output Channels = 16",
+            "score": 0.093069084
+          },
+          {
+            "filename": "ML_Unit2_2_Solved Problems.pdf",
+            "page": 3,
+            "text": "Sample Problems Based on CNN School of Computer Science and System Engineering Q2. Perform the following Max Pooling operation using a 2 × 2 pooling window and Stride = 2 for the given feature map: Find the output feature map and explain the pooling process. Sol. Step 1 Window 1 3 5 1 7 Maximum = 7 Step 2 Window 2 2 8 6 4 Maximum = 8",
+            "score": 0.076467514
+          },
+          {
+            "filename": "ML_Unit2_2_Solved Problems.pdf",
+            "page": 9,
+            "text": "Sample Problems Based on CNN School of Computer Science and System Engineering Q5. A 28 × 28 grayscale image is convolved with a 5 × 5 filter using: Stride = 1 Padding = 0 Find: 1. Output feature map size 2. Number of convolution operations 3. Total multiplications Sol. 1. Output Feature Map Size 28 − 5 1 + 1 = 24 Output 24 × 24",
+            "score": 0.054936409
+          },
+          {
+            "filename": "ML_Unit2_2_Solved Problems.pdf",
+            "page": 11,
+            "text": "Sample Problems Based on CNN School of Computer Science and System Engineering Q6. Input: 64×64×3 Filters = 32, Kernel = 3×3, Stride =1, Padding =1 Find: (a) Output size (b) Output channels (c) Total feature maps Sol. (a) Output Size 64 − 3 + 2 1 1 + 1 = 64 Therefore, 64 × 64",
+            "score": 0.0488591194
+          },
+          {
+            "filename": "ML_Unit2_2_Solved Problems.pdf",
+            "page": 10,
+            "text": "Sample Problems Based on CNN School of Computer Science and System Engineering 2. Number of Convolution Operations 24 × 24 = 576 3. Total Multiplications Each convolution uses 5 × 5 = 25 multiplications. Total 576 × 25 = 14,400 multiplications.",
+            "score": 0.044506073
+          }
+        ]
+      }
+    ]
+  }
+}

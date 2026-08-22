@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pinecone
+sentence-transformers
+pypdf
+python-dotenv
+python-jose
+passlib
